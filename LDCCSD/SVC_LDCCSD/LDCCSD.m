@@ -1,0 +1,137 @@
+function [labels_pred,Y,history] = LDCCSD(X,Y_true , params)
+% ------------------------------------------------------------
+% Correlated Self-Paced LDC with Label-Guided Alignment
+% 算法本体：交替更新 G, Y, u
+% 输入:
+%   X (n×d)       : 数据
+%   Y_true (n×1)  : 仅用于确定簇数 c（不在此处做评估）
+%   params        : 结构体(见 set_default_params)
+% 输出:
+%   labels_pred   : 预测标签（由最终 Y 得到）
+%   Y, G, u       : 最终解
+%   history       : 训练过程信息（目标值轨迹、tau轨迹、u统计）
+
+% ------------------------------------------------------------
+
+% ---- 基本量 ----
+n  = size(X,1);
+c=params.nCluster;
+k  = params.k;
+H  = eye(k) - (1/k)*ones(k);
+tau=params.tau;
+nbrIdx = build_knn_graph(X, k);
+
+
+
+% ---- 初始化   ----
+% (1) ------------u----------------
+
+%u = 0.01 + 0.05*rand(n, 1);  % 范围[0.05, 0.2]
+u=rand(n,1);
+idx=u>0.7;
+u(idx)=0.01;
+%u = ones(n, 1);
+
+
+
+% (2)------------ L_u------------
+
+% [F ,L ,eigval] = LGC(X, params);
+% L_u = assemble_Lu(X, H, nbrIdx, u, params.gamma);
+
+
+% (3)------------ G------------
+
+% [G, ~] = eigs(L_u,c, 'smallestreal');
+% G=a;
+% options = [];
+% %options.NeighborMode = 'KNN';
+% options.k = 5;
+% options.WeightMode = 'HeatKernel';
+% options.t = 1;
+% W = constructW(X, options);
+% D_half = 1./sqrt(sum(W, 1)+eps);
+% L = eye(n) - diag(D_half) * W * diag(D_half);
+% [V, D] = eig(L);
+% D = max(D, 0);                    % 负值截断
+% L = V*D*V';
+% L_u = .5 * (L + L')/2;
+%[G, eigval]=eigs(L_u, c, 'smallestreal');
+%eigval = diag(eigval);
+L_u = assemble_Lu(X, H, nbrIdx, u, params.gamma);
+%[G, eigval]=eigs(L_u, c, 'smallestreal');
+% G = orth(randn(n, params.nCluster)); 
+%G2 = bsxfun(@rdivide, G, sqrt(sum(G.^2, 2)) + eps);
+%lab = kmeans(G2, c, 'Replicates', 10, 'MaxIter', 100);
+
+% (4) ------------Y------------
+
+lab = randi(c, [n,1]);
+Y = full(sparse((1:n)', lab, 1, n, c));
+result_kmeans= my_eval_y(lab, Y_true);
+G = Y * diag(sum(Y,1).^(-.5));
+disp(['init Label ', num2str(result_kmeans.Accuracy), '    ', num2str(trace(G' * L_u  * G))]);
+
+
+
+% ---- 外层迭代 ----
+for it = 1:params.maxIter
+    % (1)------------ Y------------
+
+    L_u = assemble_Lu(X, H, nbrIdx, u, params.gamma);
+   % innerIterY = 1;
+    %Q = L_u * G;
+   
+    %U = -Q;
+    % Y = update_Y_improved(U, Y, innerIterY);
+    % Y= update_Y_min(Q, Y, innerIterY);
+    [Y, obj_F] = solve_Y(L_u, Y);
+
+    % (2) ------------G------------
+
+    %G= update_G(L_u, Y);
+    [G,a] = eigs(L_u,c,'smallestreal');
+    G2 = bsxfun(@rdivide, G, sqrt(sum(G.^2, 2)) + eps);
+    labels_pred = kmeans(G2, c, 'Replicates', 10, 'MaxIter', 100);
+
+    %[~, labels_pred] = max(Y, [], 2);
+    result= my_eval_y(labels_pred, Y_true);
+    disp(['iter', num2str(it), ': ', num2str(result.Accuracy), '    ', num2str(trace(G' * L_u * G))]);
+
+    %[F_ldm, L_ldm, ~] = LGC(X',  params);
+    %G = Y * diag(sum(Y,1).^(-.5));
+
+    % (3) ------------u  +  tau------------
+    options = optimoptions('fmincon', ...
+        'SpecifyObjectiveGradient', true, ...
+        'Algorithm','sqp', ...
+        'HessianApproximation','lbfgs', ...
+        'Display','none', ...
+        'MaxIterations', params.innerU_MaxIters, ...
+        'StepTolerance',1, ...
+        'OptimalityTolerance',1e-2);
+
+     [u, tau, fval] = update_u_fixed(u, X',Y', G', nbrIdx', H, params.gamma, ...
+                                     tau, params.tau_beta, options, it, params.maxIter);
+   
+    %fval= objective_value_2(u, X', Y', G', nbrIdx', H, params.gamma, 0);
+    %U_log{it} = u;
+   
+    % -- 监控/记录 --
+    history.obj(it)      = fval;
+    history.tau(it)      = tau;
+    history.u_stat(it,:) = [min(u) median(u) max(u)];
+    tau=tau*1.01;
+    % 监控
+
+%     if params.verbose
+%         fprintf('Iter %2d | tau=%.3f | mean(u)=%.3f | min cluster size=%d\n', ...
+%             it, tau, mean(u), min(sum(Y,1)));
+%     end
+end
+G2 = bsxfun(@rdivide, G, sqrt(sum(G.^2, 2)) + eps);
+labels_pred = kmeans(G2, c, 'Replicates', 10, 'MaxIter', 100);
+
+end
+
+
